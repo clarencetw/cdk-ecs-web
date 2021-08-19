@@ -35,5 +35,31 @@ export class CdkEcsWebStack extends cdk.Stack {
       autoScalingGroup,
     });
     cluster.addAsgCapacityProvider(capacityProvider);
+
+    const taskDefinition = new ecs.Ec2TaskDefinition(this, 'TaskDef');
+
+    taskDefinition.addContainer('web', {
+      image: ecs.ContainerImage.fromRegistry('amazon/amazon-ecs-sample'),
+      memoryReservationMiB: 256,
+      portMappings: [{ containerPort: 3000 }],
+      logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'web' })
+    });
+
+    new ecs.Ec2Service(this, 'EC2Service', {
+      cluster,
+      taskDefinition,
+      desiredCount: 3,
+      capacityProviderStrategies: [
+        {
+          capacityProvider: spotCapacityProvider.capacityProviderName,
+          weight: 2,
+          // base: 3,
+        },
+        {
+          capacityProvider: capacityProvider.capacityProviderName,
+          weight: 1
+        }
+      ],
+    });
   }
 }
