@@ -2,6 +2,7 @@ import * as cdk from '@aws-cdk/core';
 import * as ec2 from '@aws-cdk/aws-ec2';
 import * as ecs from "@aws-cdk/aws-ecs";
 import * as autoscaling from "@aws-cdk/aws-autoscaling";
+import * as elbv2 from '@aws-cdk/aws-elasticloadbalancingv2';
 
 export class CdkEcsWebStack extends cdk.Stack {
   constructor(scope: cdk.Construct, id: string, props?: cdk.StackProps) {
@@ -41,11 +42,11 @@ export class CdkEcsWebStack extends cdk.Stack {
     taskDefinition.addContainer('web', {
       image: ecs.ContainerImage.fromRegistry('amazon/amazon-ecs-sample'),
       memoryReservationMiB: 256,
-      portMappings: [{ containerPort: 3000 }],
+      portMappings: [{ containerPort: 80 }],
       logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'web' })
     });
 
-    new ecs.Ec2Service(this, 'EC2Service', {
+    const service = new ecs.Ec2Service(this, 'EC2Service', {
       cluster,
       taskDefinition,
       desiredCount: 3,
@@ -53,7 +54,6 @@ export class CdkEcsWebStack extends cdk.Stack {
         {
           capacityProvider: spotCapacityProvider.capacityProviderName,
           weight: 2,
-          // base: 3,
         },
         {
           capacityProvider: capacityProvider.capacityProviderName,
@@ -61,5 +61,21 @@ export class CdkEcsWebStack extends cdk.Stack {
         }
       ],
     });
+
+    const lb = new elbv2.ApplicationLoadBalancer(this, "LB", {
+      vpc,
+      internetFacing: true,
+    });
+    const listener = lb.addListener("Listener", { port: 80 });
+    listener.addTargets('web', {
+      port: 80,
+      targets: [service],
+    });
+    listener.connections.allowTo(spotAutoScalingGroup, ec2.Port.tcpRange(32768, 65535))
+    listener.connections.allowTo(autoScalingGroup, ec2.Port.tcpRange(32768, 65535))
+
+    new cdk.CfnOutput(this, 'WebURL', {
+      value: `http://${lb.loadBalancerDnsName}/`
+    })
   }
 }
