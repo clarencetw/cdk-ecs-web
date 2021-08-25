@@ -1,6 +1,7 @@
 import * as cdk from '@aws-cdk/core';
 import * as ec2 from '@aws-cdk/aws-ec2';
 import * as ecs from "@aws-cdk/aws-ecs";
+import * as autoscaling from "@aws-cdk/aws-autoscaling";
 import * as elbv2 from '@aws-cdk/aws-elasticloadbalancingv2';
 
 export class CdkEcsWebStack extends cdk.Stack {
@@ -10,22 +11,53 @@ export class CdkEcsWebStack extends cdk.Stack {
     const vpc = new ec2.Vpc(this, 'VPC', { natGateways: 1 });
     const cluster = new ecs.Cluster(this, "EcsCluster", { vpc });
 
-    const fargateTaskDefinition = new ecs.FargateTaskDefinition(this, 'TaskDef');
+    const spotAutoScalingGroup = new autoscaling.AutoScalingGroup(this, 'spotASG', {
+      vpc,
+      instanceType: new ec2.InstanceType('t3.medium'),
+      machineImage: ecs.EcsOptimizedImage.amazonLinux2(),
+      minCapacity: 0,
+      maxCapacity: 6,
+      spotPrice: '0.0416'
+    });
+    const spotCapacityProvider = new ecs.AsgCapacityProvider(this, 'spotAsgCapacityProvider', {
+      autoScalingGroup: spotAutoScalingGroup,
+      spotInstanceDraining: true,
+    });
+    cluster.addAsgCapacityProvider(spotCapacityProvider);
 
-    fargateTaskDefinition.addContainer('web', {
+    const taskDefinition = new ecs.TaskDefinition(this, 'TaskDef', {
+      memoryMiB: '512',
+      cpu: '256',
+      networkMode: ecs.NetworkMode.AWS_VPC,
+      compatibility: ecs.Compatibility.EC2_AND_FARGATE,
+    });
+
+    taskDefinition.addContainer('web', {
       image: ecs.ContainerImage.fromRegistry('amazon/amazon-ecs-sample'),
+      memoryReservationMiB: 256,
       portMappings: [{ containerPort: 80 }],
       logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'web' })
     });
 
-    const service = new ecs.FargateService(this, 'FargateService', {
+    const ec2Service = new ecs.Ec2Service(this, 'EC2Service', {
       cluster,
-      taskDefinition: fargateTaskDefinition,
-      desiredCount: 3,
+      taskDefinition,
+      desiredCount: 1,
+      capacityProviderStrategies: [
+        {
+          capacityProvider: spotCapacityProvider.capacityProviderName,
+          weight: 1,
+        }
+      ],
+    });
+    const fargateService = new ecs.FargateService(this, 'FargateService', {
+      cluster,
+      taskDefinition,
+      desiredCount: 2,
       capacityProviderStrategies: [
         {
           capacityProvider: 'FARGATE_SPOT',
-          weight: 2,
+          weight: 1,
         },
         {
           capacityProvider: 'FARGATE',
@@ -41,7 +73,7 @@ export class CdkEcsWebStack extends cdk.Stack {
     const listener = lb.addListener("Listener", { port: 80 });
     listener.addTargets('web', {
       port: 80,
-      targets: [service],
+      targets: [ec2Service, fargateService],
     });
 
     new cdk.CfnOutput(this, 'WebURL', {
