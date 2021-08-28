@@ -1,8 +1,8 @@
 import * as cdk from '@aws-cdk/core';
 import * as ec2 from '@aws-cdk/aws-ec2';
 import * as ecs from "@aws-cdk/aws-ecs";
-import * as autoscaling from "@aws-cdk/aws-autoscaling";
 import * as elbv2 from '@aws-cdk/aws-elasticloadbalancingv2';
+import * as rds from '@aws-cdk/aws-rds';
 
 export class CdkEcsWebStack extends cdk.Stack {
   constructor(scope: cdk.Construct, id: string, props?: cdk.StackProps) {
@@ -11,19 +11,15 @@ export class CdkEcsWebStack extends cdk.Stack {
     const vpc = new ec2.Vpc(this, 'VPC', { natGateways: 1 });
     const cluster = new ecs.Cluster(this, "EcsCluster", { vpc });
 
-    const spotAutoScalingGroup = new autoscaling.AutoScalingGroup(this, 'spotASG', {
-      vpc,
-      instanceType: new ec2.InstanceType('t3.medium'),
-      machineImage: ecs.EcsOptimizedImage.amazonLinux2(),
-      minCapacity: 0,
-      maxCapacity: 6,
-      spotPrice: '0.0416'
+    const rdsInstance = new rds.DatabaseCluster(this, "Database", {
+      engine: rds.DatabaseClusterEngine.auroraMysql({ version: rds.AuroraMysqlEngineVersion.VER_2_09_2 }),
+      instanceProps: {
+        instanceType: new ec2.InstanceType('t3.small'),
+        vpc,
+      },
+      defaultDatabaseName: 'web_database',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
-    const spotCapacityProvider = new ecs.AsgCapacityProvider(this, 'spotAsgCapacityProvider', {
-      autoScalingGroup: spotAutoScalingGroup,
-      spotInstanceDraining: true,
-    });
-    cluster.addAsgCapacityProvider(spotCapacityProvider);
 
     const taskDefinition = new ecs.TaskDefinition(this, 'TaskDef', {
       memoryMiB: '512',
@@ -33,38 +29,41 @@ export class CdkEcsWebStack extends cdk.Stack {
     });
 
     taskDefinition.addContainer('web', {
-      image: ecs.ContainerImage.fromRegistry('amazon/amazon-ecs-sample'),
+      image: ecs.ContainerImage.fromRegistry('clarencetw/nodejs-web-server'),
       memoryReservationMiB: 256,
       portMappings: [{ containerPort: 80 }],
-      logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'web' })
+      logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'nodejs-web-server' }),
+      environment: {
+        NODE_ENV: "production",
+        PORT: "80",
+        DB_DATABASE: 'web_database'
+      },
+      secrets: {
+        DB_HOST: ecs.Secret.fromSecretsManager(rdsInstance.secret!, "host"),
+        DB_USERNAME: ecs.Secret.fromSecretsManager(
+          rdsInstance.secret!,
+          "username"
+        ),
+        DB_PASSWORD: ecs.Secret.fromSecretsManager(
+          rdsInstance.secret!,
+          "password"
+        ),
+      },
     });
 
-    const ec2Service = new ecs.Ec2Service(this, 'EC2Service', {
+    const fargateService = new ecs.FargateService(this, 'FargateService', {
       cluster,
       taskDefinition,
       desiredCount: 1,
       capacityProviderStrategies: [
         {
-          capacityProvider: spotCapacityProvider.capacityProviderName,
-          weight: 1,
-        }
-      ],
-    });
-    const fargateService = new ecs.FargateService(this, 'FargateService', {
-      cluster,
-      taskDefinition,
-      desiredCount: 2,
-      capacityProviderStrategies: [
-        {
           capacityProvider: 'FARGATE_SPOT',
           weight: 1,
-        },
-        {
-          capacityProvider: 'FARGATE',
-          weight: 1,
         }
       ],
     });
+
+    rdsInstance.connections.allowFrom(fargateService, rdsInstance.connections.defaultPort!, `allow ${fargateService.serviceName} to connect db`);
 
     const lb = new elbv2.ApplicationLoadBalancer(this, "LB", {
       vpc,
@@ -73,11 +72,14 @@ export class CdkEcsWebStack extends cdk.Stack {
     const listener = lb.addListener("Listener", { port: 80 });
     listener.addTargets('web', {
       port: 80,
-      targets: [ec2Service, fargateService],
+      targets: [fargateService],
     });
 
-    new cdk.CfnOutput(this, 'WebURL', {
-      value: `http://${lb.loadBalancerDnsName}/`
+    new cdk.CfnOutput(this, 'MySQL_Page', {
+      value: `http://${lb.loadBalancerDnsName}/mysql`
+    })
+    new cdk.CfnOutput(this, 'ENV_Page', {
+      value: `http://${lb.loadBalancerDnsName}/env`
     })
   }
 }
